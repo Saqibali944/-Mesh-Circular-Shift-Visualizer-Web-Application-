@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mesh Circular Shift Visualizer | Parallel Computing</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }
+        .container { max-width: 1400px; margin: auto; background: white; border-radius: 20px; box-shadow: 0 8px 20px rgba(0,0,0,0.1); padding: 20px; }
+        h1, h2 { color: #1e3c72; }
+        .controls { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-end; background: #e9ecef; padding: 15px; border-radius: 12px; margin-bottom: 20px; }
+        .control-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-weight: bold; color: #0b3b5f; }
+        input, button { padding: 8px 12px; font-size: 1rem; border-radius: 8px; border: 1px solid #ccc; }
+        button { background: #2c7da0; color: white; border: none; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #1f5e7a; }
+        button:disabled { background: #aaa; cursor: not-allowed; }
+        .grid-container { display: flex; justify-content: center; margin: 20px 0; overflow-x: auto; }
+        .mesh { display: inline-grid; gap: 8px; background: #dee2e6; padding: 15px; border-radius: 16px; }
+        .node { background: white; border-radius: 12px; padding: 12px; text-align: center; box-shadow: 0 2px 6px rgba(0,0,0,0.1); transition: 0.2s; min-width: 70px; border: 1px solid #adb5bd; }
+        .node span { display: block; font-weight: bold; font-size: 1.1rem; }
+        .node small { color: #495057; font-size: 0.7rem; }
+        .state-panels { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-between; margin: 20px 0; }
+        .state-card { flex: 1; background: #f8f9fa; border-radius: 16px; padding: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        .state-card h3 { margin-top: 0; text-align: center; }
+        .complexity-panel { background: #e2eafc; padding: 15px; border-radius: 16px; margin: 20px 0; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; }
+        .complexity-stats { flex: 2; }
+        .chart-box { flex: 1; min-width: 250px; }
+        canvas#complexityChart { max-height: 200px; }
+        .arrow { font-size: 1.5rem; margin: 0 5px; }
+        button#animateBtn { background: #2a9d8f; font-size: 1.2rem; padding: 10px 24px; }
+        .status { margin-top: 15px; font-style: italic; color: #0a9396; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🌀 Mesh Circular Shift Visualizer</h1>
+    <p>2‑Stage algorithm: Row shift → Column shift | Toroidal wrap‑around</p>
+
+    <div class="controls">
+        <div class="control-group">
+            <label>p (perfect square, 4‑64):</label>
+            <input type="number" id="pInput" value="16" step="1" min="4" max="64">
+        </div>
+        <div class="control-group">
+            <label>q (shift, 1 to p-1):</label>
+            <input type="number" id="qInput" value="6" step="1" min="1">
+        </div>
+        <button id="resetBtn">⟳ Reset / New Grid</button>
+        <button id="animateBtn" disabled>▶ Animate Step-by-Step</button>
+    </div>
+
+    <div class="state-panels">
+        <div class="state-card"><h3>📦 Initial State</h3><div id="initialGrid"></div></div>
+        <div class="state-card"><h3>➡️ After Row Shift (Stage 1)</h3><div id="rowShiftGrid"></div></div>
+        <div class="state-card"><h3>⬇️ After Column Shift (Stage 2 - Final)</h3><div id="finalGrid"></div></div>
+    </div>
+
+    <div class="complexity-panel">
+        <div class="complexity-stats">
+            <h3>📊 Complexity Analysis</h3>
+            <p><strong>Row shift amount:</strong> <span id="rowAmt">-</span> &nbsp;|&nbsp;
+            <strong>Column shift amount:</strong> <span id="colAmt">-</span></p>
+            <p><strong>Total Mesh communication steps:</strong> <span id="meshSteps">-</span><br>
+            <strong>Equivalent Ring steps (min(q, p-q)):</strong> <span id="ringSteps">-</span></p>
+            <p><em>Mesh is more efficient because it splits shift into row + column, reducing steps from O(p) to O(√p).</em></p>
+        </div>
+        <div class="chart-box">
+            <canvas id="complexityChart" width="300" height="150"></canvas>
+        </div>
+    </div>
+    <div class="status" id="statusMsg">Ready. Enter p and q, then click Reset.</div>
+</div>
+
+<script>
+    // ---------- Global state ----------
+    let currentP = 16, currentQ = 6;
+    let size = 0;           // sqrt(p)
+    let originalData = [];  // 2D array (row, col) -> node index (data = index)
+    let afterRow = [];
+    let afterCol = [];
+    let chart = null;
+
+    // DOM elements
+    const pInput = document.getElementById('pInput');
+    const qInput = document.getElementById('qInput');
+    const resetBtn = document.getElementById('resetBtn');
+    const animateBtn = document.getElementById('animateBtn');
+    const initialDiv = document.getElementById('initialGrid');
+    const rowDiv = document.getElementById('rowShiftGrid');
+    const finalDiv = document.getElementById('finalGrid');
+    const rowAmtSpan = document.getElementById('rowAmt');
+    const colAmtSpan = document.getElementById('colAmt');
+    const meshStepsSpan = document.getElementById('meshSteps');
+    const ringStepsSpan = document.getElementById('ringSteps');
+    const statusSpan = document.getElementById('statusMsg');
+
+    function isValidPerfectSquare(p) {
+        let s = Math.sqrt(p);
+        return Number.isInteger(s) && p >= 4 && p <= 64;
+    }
+
+    function updateInputBounds() {
+        let p = parseInt(pInput.value);
+        if (isValidPerfectSquare(p)) {
+            qInput.max = p - 1;
+            let q = parseInt(qInput.value);
+            if (q > p-1) qInput.value = p-1;
+            if (q < 1) qInput.value = 1;
+        }
+    }
+
+    // Create 2D array of node indices (row-major)
+    function initDataArray(p) {
+        const s = Math.sqrt(p);
+        let arr = Array(s);
+        for (let i = 0; i < s; i++) {
+            arr[i] = Array(s);
+            for (let j = 0; j < s; j++) {
+                arr[i][j] = i * s + j;   // each node holds its own ID initially
+            }
+        }
+        return arr;
+    }
+
+    // Row shift: each row circular right by rowShift
+    function applyRowShift(data, rowShift) {
+        const s = data.length;
+        let newData = Array(s);
+        for (let i = 0; i < s; i++) {
+            newData[i] = Array(s);
+            for (let j = 0; j < s; j++) {
+                let srcCol = (j - rowShift + s) % s;
+                newData[i][j] = data[i][srcCol];
+            }
+        }
+        return newData;
+    }
+
+    // Column shift: each column circular down by colShift
+    function applyColumnShift(data, colShift) {
+        const s = data.length;
+        let newData = Array(s);
+        for (let i = 0; i < s; i++) newData[i] = Array(s);
+        for (let j = 0; j < s; j++) {
+            for (let i = 0; i < s; i++) {
+                let srcRow = (i - colShift + s) % s;
+                newData[i][j] = data[srcRow][j];
+            }
+        }
+        return newData;
+    }
+
+    function computeShiftParams(p, q) {
+        const s = Math.sqrt(p);
+        const rowShift = q % s;
+        const colShift = Math.floor(q / s);
+        return { rowShift, colShift, s };
+    }
+
+    function updateAll() {
+        let p = parseInt(pInput.value);
+        let q = parseInt(qInput.value);
+        if (!isValidPerfectSquare(p)) {
+            statusSpan.innerText = "Error: p must be a perfect square between 4 and 64.";
+            return false;
+        }
+        if (q < 1 || q >= p) {
+            statusSpan.innerText = `Error: q must be between 1 and ${p-1}.`;
+            return false;
+        }
+        currentP = p; currentQ = q;
+        const { rowShift, colShift, s } = computeShiftParams(p, q);
+        size = s;
+
+        // Generate original data
+        originalData = initDataArray(p);
+        afterRow = applyRowShift(originalData, rowShift);
+        afterCol = applyColumnShift(afterRow, colShift);
+
+        // Render grids
+        renderGrid(originalData, initialDiv);
+        renderGrid(afterRow, rowDiv);
+        renderGrid(afterCol, finalDiv);
+
+        // Update complexity panel
+        rowAmtSpan.innerText = rowShift;
+        colAmtSpan.innerText = colShift;
+        const meshStepsVal = rowShift + colShift;
+        const ringStepsVal = Math.min(q, p - q);
+        meshStepsSpan.innerText = meshStepsVal;
+        ringStepsSpan.innerText = ringStepsVal;
+
+        // Update chart
+        if (chart) chart.destroy();
+        const ctx = document.getElementById('complexityChart').getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['Mesh Steps', 'Ring Steps'],
+                datasets: [{
+                    label: 'Number of communication steps',
+                    data: [meshStepsVal, ringStepsVal],
+                    backgroundColor: ['#2c7da0', '#e76f51']
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { position: 'top' } } }
+        });
+
+        statusSpan.innerText = `Ready. p=${p}, q=${q} | Row shift=${rowShift}, Col shift=${colShift}`;
+        animateBtn.disabled = false;
+        return true;
+    }
+
+    function renderGrid(data, container) {
+        const s = data.length;
+        container.innerHTML = '';
+        const gridDiv = document.createElement('div');
+        gridDiv.className = 'mesh';
+        gridDiv.style.gridTemplateColumns = `repeat(${s}, minmax(70px, auto))`;
+        for (let i = 0; i < s; i++) {
+            for (let j = 0; j < s; j++) {
+                const val = data[i][j];
+                const nodeDiv = document.createElement('div');
+                nodeDiv.className = 'node';
+                nodeDiv.innerHTML = `<span>${val}</span><small>(${i},${j})</small>`;
+                gridDiv.appendChild(nodeDiv);
+            }
+        }
+        container.appendChild(gridDiv);
+    }
+
+    // ---------- Step-by-step animation (visual arrows + stages) ----------
+    let animationInterval = null;
+    function stopAnimation() {
+        if (animationInterval) clearInterval(animationInterval);
+        animateBtn.disabled = false;
+        animateBtn.textContent = '▶ Animate Step-by-Step';
+    }
+
+    function startAnimation() {
+        if (animationInterval) stopAnimation();
+        // Reset to initial before animating
+        if (!updateAll()) return;
+        let step = 0; // 0: initial, 1: row shift in progress, 2: row shift done, 3: col shift in progress, 4: done
+        const { rowShift, colShift, s } = computeShiftParams(currentP, currentQ);
+        // Create temporary overlay to show arrows (simplified: we just highlight grids and show status)
+        const rowGridElem = document.getElementById('rowShiftGrid');
+        const finalGridElem = document.getElementById('finalGrid');
+        const initGridElem = document.getElementById('initialGrid');
+        
+        function animateStep() {
+            if (step === 0) {
+                statusSpan.innerText = '🎬 Animation: Starting... showing initial state.';
+                step = 1;
+            } else if (step === 1) {
+                statusSpan.innerText = `➡️ Stage 1: Row shift (right by ${rowShift}) in progress...`;
+                // highlight row shift direction on initial grid? For simplicity we just update the row shift grid.
+                renderGrid(afterRow, rowGridElem);
+                step = 2;
+            } else if (step === 2) {
+                statusSpan.innerText = `✅ Stage 1 complete. Now Stage 2: Column shift (down by ${colShift}).`;
+                step = 3;
+            } else if (step === 3) {
+                statusSpan.innerText = `⬇️ Applying column shift... final state ready.`;
+                renderGrid(afterCol, finalGridElem);
+                step = 4;
+            } else {
+                statusSpan.innerText = `🎉 Animation finished! Final layout corresponds to circular shift of ${currentQ}.`;
+                stopAnimation();
+            }
+        }
+        animateStep(); // show initial step message
+        animationInterval = setInterval(() => {
+            animateStep();
+            if (step === 4) stopAnimation();
+        }, 1200);
+        animateBtn.disabled = true;
+        animateBtn.textContent = '⏳ Animating...';
+    }
+
+    resetBtn.addEventListener('click', () => {
+        stopAnimation();
+        updateAll();
+    });
+    animateBtn.addEventListener('click', startAnimation);
+    pInput.addEventListener('input', () => {
+        let p = parseInt(pInput.value);
+        if (isValidPerfectSquare(p)) {
+            qInput.max = p-1;
+            if (parseInt(qInput.value) >= p) qInput.value = p-1;
+            if (parseInt(qInput.value) < 1) qInput.value = 1;
+            updateAll();
+        } else {
+            statusSpan.innerText = "p must be perfect square (4,9,16,25,36,49,64)";
+            animateBtn.disabled = true;
+        }
+    });
+    qInput.addEventListener('input', () => { updateAll(); });
+    
+    // initial load
+    updateAll();
+</script>
+</body>
+</html>
